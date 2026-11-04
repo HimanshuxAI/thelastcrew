@@ -80,7 +80,12 @@ front ends to the same game:
 | Build | Folder | Status |
 |---|---|---|
 | Unity | `Assets/` | written, waiting on editor install |
-| Browser / PWA | `web/` | **working**, installable, offline-capable |
+| Browser / PWA | `web/` | **live**, installable, offline-capable |
+
+**Play it: https://himanshuxai.github.io/thelastcrew/**
+
+Any push to `main` redeploys the web build automatically
+(`.github/workflows/deploy-pages.yml`). Only `web/` is published.
 
 The browser build exists because Web Audio has real HRTF spatialisation and
 built-in speech synthesis, both of which Unity needs plugins for. Try it first:
