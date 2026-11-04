@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Last Crew">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#05070a">
+<meta name="description" content="An audio maze on an alien planet. Your crew is inside. You navigate by sound.">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<title>TheLastCrew — audio maze</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+  html, body {
+    height: 100%; overflow: hidden; background: #05070a; color: #cfe6ff;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    touch-action: none; overscroll-behavior: none;
+  }
+  #start {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: radial-gradient(circle at 50% 40%, #0d1620, #05070a 70%);
+    text-align: center; padding: 24px; z-index: 10;
+  }
+  #start h1 { font-size: 20px; letter-spacing: .18em; text-transform: uppercase; font-weight: 500; color: #8fd4ff; }
+  #start p { margin: 14px auto; max-width: 34em; color: #7f9bb5; }
+  #start button {
+    margin-top: 10px; padding: 16px 28px; font: inherit; font-size: 16px;
+    background: #0e2233; color: #bfe9ff; border: 1px solid #2c5a7a; border-radius: 2px;
+    letter-spacing: .08em;
+  }
+  #start button:active { background: #123049; }
+  #start button.primary { background: #17405c; border-color: #4fa8d8; color: #e6f7ff; }
+  #start button.primary:active { background: #1d5277; }
+  #start .modes { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  #start .sub { font-size: 12px; color: #5c7891; margin-top: 20px; }
+  #hud {
+    position: fixed; left: 12px; top: 10px; font-size: 11px; color: #3f5d74;
+    pointer-events: none; white-space: pre;
+  }
+  #zones { position: fixed; inset: 0; pointer-events: none; opacity: 0; }
+  #zones.show { opacity: .5; }
+  #zones div { position: absolute; border: 1px dashed #2b4f6b; font-size: 10px; color: #4d7d9e; padding: 4px; }
+</style>
+</head>
+<body>
+
+<div id="start">
+  <div>
+    <h1>The Last Crew</h1>
+    <p><strong>Headphones on.</strong> This maze has no picture. You will hear the walls before you touch them.</p>
+    <div class="modes">
+      <button id="go-tilt" class="primary">Tilt to walk</button>
+      <button id="go-drag">Drag instead</button>
+    </div>
+    <p class="sub">Both use the same corners: top-left and top-right turn, bottom-right listens, bottom-left is your hand.</p>
+  </div>
+</div>
+
+<div id="hud"></div>
+<div id="zones">
+  <div style="left:0;top:0;width:25%;height:25%">turn L</div>
+  <div style="right:0;top:0;width:25%;height:25%">turn R</div>
+  <div style="left:0;bottom:0;width:25%;height:25%">hand</div>
+  <div style="right:0;bottom:0;width:25%;height:25%">ear</div>
+  <div style="left:41%;top:41%;width:18%;height:18%">menu</div>
+</div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- config
+
+const CFG = {
+  cell: 3,
+  moveSpeed: 1.8,
+  quietSpeed: 0.6,
+  turnSpeed: Math.PI / 2,   // 90 deg per second
+  stride: 0.85,
+  radius: 0.32,
+  probeCount: 8,
+  maxRange: 5,
+  near: 0.8,
+  gridW: 19,
+  gridH: 19,
+  seed: 1234,
+};
+
+// ---------------------------------------------------------------- maze
+
+function makeMaze(w, h, seed) {
+  w = Math.max(7, w | 1);
+  h = Math.max(7, h | 1);
+
+  const solid = new Uint8Array(w * h).fill(1);
+  let s = (seed >>> 0) || 1;
+
+  function rnd() {
+    s ^= s << 13; s >>>= 0;
+    s ^= s >>> 17;
+    s ^= s << 5;  s >>>= 0;
+    return s / 4294967296;
+  }
+
+  const id = (x, y) => y * w + x;
+  const isSolid = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 1 : solid[id(x, y)];
+  const isOpen = (x, y) => !isSolid(x, y);
+  const set = (x, y, v) => { if (x >= 0 && y >= 0 && x < w && y < h) solid[id(x, y)] = v; };
+
+  // Recursive backtracker: rooms live on odd coordinates.
+  set(1, 1, 0);
+  const stack = [[1, 1]];
+
+  while (stack.length) {
+    const [cx, cy] = stack[stack.length - 1];
+    const cand = [];
+    for (const [dx, dy] of [[0, 2], [0, -2], [2, 0], [-2, 0]]) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx <= 0 || ny <= 0 || nx >= w - 1 || ny >= h - 1) continue;
+      if (!solid[id(nx, ny)]) continue;
+      cand.push([nx, ny]);
+    }
+    if (!cand.length) { stack.pop(); continue; }
+    const [nx, ny] = cand[(rnd() * cand.length) | 0];
+    set((cx + nx) / 2, (cy + ny) / 2, 0);
+    set(nx, ny, 0);
+    stack.push([nx, ny]);
+  }
+
+  // Loops, so it is not one long corridor of dead ends.
+  let budget = (w * h / 18) | 0;
+  for (let a = 0; a < budget * 40 && budget > 0; a++) {
+    const x = 1 + ((rnd() * (w - 2)) | 0);
+    const y = 1 + ((rnd() * (h - 2)) | 0);
+    if (isOpen(x, y)) continue;
+    const hor = isOpen(x - 1, y) && isOpen(x + 1, y) && !isOpen(x, y - 1) && !isOpen(x, y + 1);
+    const ver = isOpen(x, y - 1) && isOpen(x, y + 1) && !isOpen(x - 1, y) && !isOpen(x + 1, y);
+    if (!hor && !ver) continue;
+    set(x, y, 0);
+    budget--;
+  }
+
+  // One chamber, so the player has somewhere to orient.
+  const cx = 2 + ((rnd() * Math.max(1, w - 5)) | 0);
+  const cy = 2 + ((rnd() * Math.max(1, h - 5)) | 0);
+  for (let x = cx; x < cx + 3; x++) for (let y = cy; y < cy + 3; y++) set(x, y, 0);
+
+  return { w, h, isSolid };
+}
+
+const maze = makeMaze(CFG.gridW, CFG.gridH, CFG.seed);
+
+const halfW = maze.w * CFG.cell / 2;
+const halfH = maze.h * CFG.cell / 2;
+
+function cellAt(x, z) {
+  return [
+    Math.floor((x + halfW) / CFG.cell),
+    Math.floor((z + halfH) / CFG.cell),
+  ];
+}
+
+function solidAt(x, z) {
+  const [cx, cz] = cellAt(x, z);
+  return maze.isSolid(cx, cz) === 1;
+}
+
+function blocked(x, z) {
+  const r = CFG.radius;
+  const d = r * 0.72;
+  return solidAt(x + r, z) || solidAt(x - r, z) || solidAt(x, z + r) || solidAt(x, z - r) ||
+         solidAt(x + d, z + d) || solidAt(x + d, z - d) || solidAt(x - d, z + d) || solidAt(x - d, z - d);
+}
+
+/** Distance to the first wall along a world angle, or null. */
+function raycast(angle, range) {
+  const dx = Math.sin(angle);
+  const dz = -Math.cos(angle);
+  const step = 0.1;
+  for (let d = step; d <= range; d += step) {
+    if (solidAt(player.x + dx * d, player.z + dz * d)) return d;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- player
+
+const player = {
+  x: 0, z: 0, yaw: 0,
+  quiet: false, speed: 0, walked: CFG.stride,
+};
+
+function resetPlayer() {
+  player.x = (1 + 0.5) * CFG.cell - halfW;
+  player.z = (1 + 0.5) * CFG.cell - halfH;
+  player.yaw = 0;
+  player.walked = CFG.stride;
+}
+resetPlayer();
+
+// ---------------------------------------------------------------- audio
+
+const Audio2 = {
+  ctx: null,
+  master: null,      // final gain; ducked while the voice speaks
+  bus: null,         // everything spatial lands here
+  reverb: null,
+  wallVerb: null,
+  footstepBuf: null,
+  wallBuf: null,
+  blipBuf: null,
+  probes: [],
+  echoes: [],
+  landmarks: [],
+  lastPing: -10,
+  pingCount: 0,
+
+  start() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx({ latencyHint: 'interactive' });
+    this.ctx = ctx;
+
+    // A compressor sits at the end of the chain. Eight wall voices can line up
+    // by accident; without this they clip, and clipping is a large part of what
+    // people hear as "bad audio".
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -16;
+    comp.knee.value = 14;
+    comp.ratio.value = 3;
+    comp.attack.value = 0.005;
+    comp.release.value = 0.25;
+    comp.connect(ctx.destination);
+
+    this.master = ctx.createGain();
+    this.master.gain.value = 0.95;
+    this.master.connect(comp);
+
+    this.bus = ctx.createGain();
+    this.bus.gain.value = 1;
+    this.bus.connect(this.master);
+
+    // A short corridor. Dry HRTF panning sounds like the sound is glued to your
+    // eardrum; a little reflected energy is what makes it sit in a room.
+    const conv = ctx.createConvolver();
+    conv.buffer = this.makeImpulse(1.2, 3.0);
+    const wet = ctx.createGain();
+    wet.gain.value = 0.34;
+    conv.connect(wet);
+    wet.connect(this.master);
+    this.reverb = conv;
+
+    this.wallVerb = ctx.createGain();
+    this.wallVerb.gain.value = 0.30;
+    this.wallVerb.connect(conv);
+
+    this.footstepBuf = this.makeFootstep();
+    this.wallBuf = this.makeWall();
+    this.blipBuf = this.makeBlip();
+
+    this.buildProbes();
+    this.buildEchoes();
+    this.buildLandmarks();
+  },
+
+  // -- buffers ------------------------------------------------------
+
+  /** A small room: noise that darkens as it decays. */
+  makeImpulse(seconds, decay) {
+    const ctx = this.ctx;
+    const n = Math.floor(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(2, n, ctx.sampleRate);
+
+    for (let c = 0; c < 2; c++) {
+      const d = buf.getChannelData(c);
+      let lp = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / n;
+        const k = 0.10 + 0.55 * (1 - t);
+        lp += k * (Math.random() * 2 - 1 - lp) * 0.35;
+        d[i] = lp * Math.pow(1 - t, decay);
+      }
+    }
+    return buf;
+  },
+
+  /**
+   * The wall texture.
+   *
+   * This is the single most important sound in the game, and the old version
+   * was wrong in a way that is worth writing down: it was band-passed at
+   * 750-5200 Hz. Human hearing localises with interaural *time* differences,
+   * which only survive below roughly 1.5 kHz. Above that, HRTF gives you a
+   * vague sense of "over there" at best. So the maze was rendered as hiss that
+   * smeared across the middle of the head, and it never stopped.
+   *
+   * Low, filtered noise instead: pitched low enough to have a direction, dull
+   * enough not to tire the ear.
+   */
+  makeWall() {
+    const ctx = this.ctx;
+    const n = Math.floor(ctx.sampleRate * 4);
+    const fade = Math.floor(ctx.sampleRate * 0.4);
+    const len = n - fade;
+
+    const raw = new Float32Array(n);
+    let b0 = 0, b1 = 0, b2 = 0, lp = 0;
+
+    for (let i = 0; i < n; i++) {
+      const white = Math.random() * 2 - 1;
+
+      // pink-ish: the low end carries the direction, the top just adds texture
+      b0 = 0.99765 * b0 + white * 0.0990460;
+      b1 = 0.96300 * b1 + white * 0.2965164;
+      b2 = 0.57000 * b2 + white * 1.0526913;
+      const pink = (b0 + b1 + b2 + white * 0.1848) * 0.2;
+
+      lp += 0.10 * (pink - lp);
+      raw[i] = lp;
+    }
+
+    // Seamless loop: blend the tail into the head and drop the tail. Otherwise
+    // there is an audible tick every four seconds, forever.
+    const d = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      if (i < fade) {
+        const k = i / fade;
+        d[i] = raw[i] * k + raw[len + i] * (1 - k);
+      } else {
+        d[i] = raw[i];
+      }
+    }
+
+    // Normalise by RMS, not peak. Peak-normalised noise is far quieter than it
+    // looks on a meter, and then every downstream gain is a guess.
+    let power = 0;
+    for (let i = 0; i < len; i++) power += d[i] * d[i];
+    const rms = Math.sqrt(power / len);
+    const g = rms > 0 ? 0.22 / rms : 1;
+    for (let i = 0; i < len; i++) d[i] *= g;
+
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    buf.copyToChannel(d, 0);
+    return buf;
+  },
+
+  makeFootstep() {
+    const ctx = this.ctx;
+    const n = Math.floor(ctx.sampleRate * 0.34);
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+
+    let lp = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / ctx.sampleRate;
+
+      const noise = Math.random() * 2 - 1;
+      lp += 0.18 * (noise - lp);
+      const scuff = lp * Math.exp(-t / 0.05) * 0.5;
+
+      // body: a falling thump, not a click
+      const f = 115 * Math.exp(-t / 0.06) + 52;
+      const thump = Math.sin(2 * Math.PI * f * t) * Math.exp(-t / 0.10) * 0.8;
+
+      const fade = Math.min(1, i / 200, (n - i) / 400);
+      d[i] = (scuff + thump) * fade;
+    }
+    return buf;
+  },
+
+  makeBlip() {
+    const ctx = this.ctx;
+    const n = Math.floor(ctx.sampleRate * 0.14);
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    let lp = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / ctx.sampleRate;
+      const noise = Math.random() * 2 - 1;
+      lp += 0.22 * (noise - lp);
+      d[i] = lp * Math.exp(-t / 0.028) * 0.9;
+    }
+    return buf;
+  },
+
+  // -- helpers ------------------------------------------------------
+
+  panner(opts = {}) {
+    const ctx = this.ctx;
+    const p = ctx.createPanner();
+    p.panningModel = 'HRTF';
+    p.distanceModel = 'inverse';
+    p.refDistance = opts.ref || 1;
+    p.maxDistance = opts.max || 40;
+    p.rolloffFactor = opts.roll === undefined ? 0.5 : opts.roll;
+    if (p.positionX) {
+      p.positionX.value = 0;
+      p.positionY.value = 0;
+      p.positionZ.value = 0;
+    } else if (p.setPosition) {
+      p.setPosition(0, 0, 0);
+    }
+    p.connect(this.bus);
+    return p;
+  },
+
+  setPos(p, x, z) {
+    if (p.positionX) {
+      p.positionX.value = x;
+      p.positionZ.value = z;
+    } else if (p.setPosition) {
+      p.setPosition(x, 0, z);
+    }
+  },
+
+  // -- the maze voice ----------------------------------------------
+
+  buildProbes() {
+    const ctx = this.ctx;
+
+    for (let i = 0; i < CFG.probeCount; i++) {
+      const angle = i * 2 * Math.PI / CFG.probeCount;
+
+      // Each probe gets its own stream. One shared source feeding eight panners
+      // is perfectly correlated, and correlated copies sum and cancel into a
+      // single smear instead of eight distinct directions.
+      const src = ctx.createBufferSource();
+      src.buffer = this.wallBuf;
+      src.loop = true;
+      src.start(0, Math.random() * this.wallBuf.duration);
+
+      const shape = ctx.createBiquadFilter();
+      shape.type = 'lowpass';
+      shape.frequency.value = 900;
+      shape.Q.value = 0.7;
+
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+
+      const p = this.panner({ ref: 1, max: 40, roll: 0.25 });
+
+      src.connect(shape);
+      shape.connect(gain);
+      gain.connect(p);
+      gain.connect(this.wallVerb);
+
+      this.probes.push({ angle, gain, shape, panner: p, dist: CFG.maxRange });
+    }
+  },
+
+  /** Called every frame. Body-relative panner positions: turning is listening. */
+  updateProbes(dt) {
+    const now = this.ctx.currentTime;
+
+    // Walls breathe with your movement, but the wrong way round: full level
+    // when you stand still, because that is when you are listening. Footsteps
+    // and the wind of your own walking already mask the quiet when moving.
+    const speed = player.speed || 0;
+    const moving = Math.min(1, speed / CFG.moveSpeed);
+    const breath = 1 - 0.22 * moving;
+
+    for (const probe of this.probes) {
+      const worldAngle = player.yaw + probe.angle;
+      const dist = raycast(worldAngle, CFG.maxRange);
+
+      let target = 0;
+      let cutoff = 480;
+
+      if (dist !== null) {
+        const near = Math.max(0, Math.min(1, 1 - (dist - CFG.near) / (CFG.maxRange - CFG.near)));
+        target = Math.pow(near, 1.25) * 0.38 * breath;
+        // distance eats the top end: far walls are dull, close ones bright
+        cutoff = 480 + near * 1950;
+      }
+
+      probe.gain.gain.setTargetAtTime(target, now, 0.06);
+      probe.shape.frequency.setTargetAtTime(cutoff, now, 0.08);
+
+      const d = dist === null ? CFG.maxRange : dist;
+      this.setPos(probe.panner, Math.sin(probe.angle) * d, -Math.cos(probe.angle) * d);
+      probe.dist = d;
+    }
+  },
+
+  // -- landmarks ----------------------------------------------------
+
+  /*
+   * The old landmarks were two sine oscillators running forever. A continuous
+   * 55 Hz drone is not a landmark, it is a headache with a position. These are
+   * bells instead: brief, pitched, far apart in time, easy to name.
+   */
+
+  buildLandmarks() {
+    const spots = [
+      { x: (maze.w - 1.5) * CFG.cell - halfW, z: 1.5 * CFG.cell - halfH, pitch: 196 },
+      { x: 1.5 * CFG.cell - halfW, z: (maze.h - 1.5) * CFG.cell - halfH, pitch: 294 },
+    ];
+
+    for (const spot of spots) {
+      const panner = this.panner({ ref: 1, max: 40, roll: 0.45 });
+      this.landmarks.push({ ...spot, panner, nextAt: this.ctx.currentTime + 1.5 + Math.random() * 2 });
+    }
+  },
+
+  updateLandmarks(dt) {
+    const ctx = this.ctx;
+    const cos = Math.cos(player.yaw);
+    const sin = Math.sin(player.yaw);
+
+    for (const l of this.landmarks) {
+      const dx = l.x - player.x;
+      const dz = l.z - player.z;
+
+      // rotate world offset into listener space
+      const right = dx * cos + dz * sin;
+      const fwd = dx * sin - dz * cos;
+      this.setPos(l.panner, right, -fwd);
+
+      if (ctx.currentTime >= l.nextAt) {
+        this.bell(l.panner, l.pitch);
+        l.nextAt = ctx.currentTime + 4 + Math.random() * 3;
+      }
+    }
+  },
+
+  bell(dest, freq) {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // A struck bell, roughly: a fundamental plus two inharmonic partials that
+    // die sooner. Enough identity to say "this one" without becoming a drone.
+    for (const [mult, amp, decay] of [[1, 0.30, 2.6], [2.01, 0.09, 1.6], [2.76, 0.05, 1.0]]) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq * mult;
+
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(amp, now + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + decay);
+
+      osc.connect(g);
+      g.connect(dest);
+      osc.start(now);
+      osc.stop(now + decay + 0.1);
+    }
+  },
+
+  // -- footsteps ----------------------------------------------------
+
+  footstep(loud) {
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.footstepBuf;
+    src.playbackRate.value = 0.9 + Math.random() * 0.18;
+
+    const g = ctx.createGain();
+    g.gain.value = 0.55 * loud;
+
+    src.connect(g);
+    g.connect(this.master);
+    src.start();
+    src.stop(ctx.currentTime + 0.4);
+  },
+
+  // -- ping ---------------------------------------------------------
+
+  buildEchoes() {
+    const n = 16;
+    for (let i = 0; i < n; i++) {
+      const angle = i * 2 * Math.PI / n;
+      const p = this.panner({ ref: 1, max: 30, roll: 0.7 });
+      this.echoes.push({ angle, panner: p });
+    }
+  },
+
+  ping() {
+    const ctx = this.ctx;
+    if (!ctx) return false;
+    const now = ctx.currentTime;
+    if (now - this.lastPing < 2) return false;
+    this.lastPing = now;
+    this.pingCount++;
+
+    // Outgoing pulse. Pitched down from 1.5 kHz: a sine that high is a dental
+    // drill through headphones, and there is nothing to localise anyway.
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.exponentialRampToValueAtTime(680, now + 0.08);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.15, now + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+
+    osc.connect(g);
+    g.connect(this.master);
+    g.connect(this.reverb);
+    osc.start(now);
+    osc.stop(now + 0.26);
+
+    // What comes back, one grain per direction with a wall in range.
+    let hits = 0;
+    for (const echo of this.echoes) {
+      const dist = raycast(player.yaw + echo.angle, 14);
+      if (dist === null) continue;
+      hits++;
+
+      this.setPos(echo.panner, Math.sin(echo.angle) * dist, -Math.cos(echo.angle) * dist);
+
+      const band = ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.value = 700;
+      band.Q.value = 1.2;
+
+      const src = ctx.createBufferSource();
+      src.buffer = this.blipBuf;
+      src.playbackRate.value = 0.85 + Math.random() * 0.3;
+
+      const when = now + 0.03 + dist * 0.022;
+      src.connect(band);
+      band.connect(echo.panner);
+      src.start(when);
+      src.stop(when + 0.16);
+    }
+
+    if (navigator.vibrate) navigator.vibrate(hits > 6 ? [18, 40, 18] : 18);
+    return true;
+  },
+};
+
+// ---------------------------------------------------------------- speech
+
+let voice = null;
+let duckTimer = 0;
+
+/*
+ * Choosing the voice matters more than it should. The first English voice in
+ * the list is often a low-quality formant synth that turns instructions into
+ * noise; on iOS the default is fine, on Android "Google US English" is far
+ * better than the fallback.
+ */
+function pickVoice() {
+  const all = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang));
+  if (!all.length) return null;
+
+  const preferred = [/Google US English/i, /Samantha/i, /Karen/i, /Daniel/i, /Alex/i];
+  for (const re of preferred) {
+    const hit = all.find(v => re.test(v.name));
+    if (hit) return hit;
+  }
+  return all.find(v => v.localService) || all[0];
+}
+
+/* Lower the maze under the instructions, then bring it back. */
+function duck(on) {
+  const ctx = Audio2.ctx;
+  if (!ctx || !Audio2.master) return;
+
+  const t = ctx.currentTime;
+  const gain = Audio2.master.gain;
+  gain.cancelScheduledValues(t);
+  gain.setTargetAtTime(on ? 0.28 : 0.95, t, 0.06);
+}
+
+function say(text) {
+  if (!text || !('speechSynthesis' in window)) return;
+
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.06;
+    u.pitch = 1;
+    u.volume = 1;
+
+    if (!voice) voice = pickVoice();
+    if (voice) u.voice = voice;
+
+    u.onend = () => duck(false);
+    u.onerror = () => duck(false);
+
+    speechSynthesis.cancel();
+    duck(true);
+    speechSynthesis.speak(u);
+
+    // Some engines never fire onend. Never leave the maze muted.
+    clearTimeout(duckTimer);
+    duckTimer = setTimeout(() => duck(false), 1800 + text.length * 75);
+
+    // Voices load asynchronously on Chrome; re-pick until one arrives.
+    if (!voice) speechSynthesis.addEventListener('voiceschanged', () => { voice = pickVoice(); }, { once: true });
+  } catch (e) { /* speech is optional */ }
+}
+
+// ---------------------------------------------------------------- input
+
+const input = {
+  move: { x: 0, y: 0 },
+  turn: 0,
+  pointers: new Map(),
+};
+
+const ZONE = {
+  LEFT: 'Turn left',
+  RIGHT: 'Turn right',
+  HAND: 'Hand',
+  EAR: 'Ear',
+  MENU: 'Menu',
+  MOVE: '',
+};
+
+function zoneAt(nx, ny) {
+  if (nx <= 0.25 && ny <= 0.25) return 'LEFT';
+  if (nx >= 0.75 && ny <= 0.25) return 'RIGHT';
+  if (nx <= 0.25 && ny >= 0.75) return 'HAND';
+  if (nx >= 0.75 && ny >= 0.75) return 'EAR';
+  if (Math.abs(nx - 0.5) <= 0.18 && Math.abs(ny - 0.5) <= 0.18) return 'MENU';
+  return 'MOVE';
+}
+
+const stickRadius = () => 0.12 * window.innerHeight;
+
+function onDown(e) {
+  const nx = e.clientX / window.innerWidth;
+  const ny = e.clientY / window.innerHeight;
+  const zone = zoneAt(nx, ny);
+
+  input.pointers.set(e.pointerId, {
+    zone,
+    originX: e.clientX,
+    originY: e.clientY,
+    x: e.clientX,
+    y: e.clientY,
+    t0: performance.now(),
+    held: false,
+  });
+
+  // Zone names are only spoken while learning. Once you know the corners,
+  // hearing "Turn left" every time you touch the screen is just noise.
+  if (tutorial.active) {
+    const name = ZONE[zone];
+    if (name) say(name);
+  }
+}
+
+function onMove(e) {
+  const p = input.pointers.get(e.pointerId);
+  if (!p) return;
+  p.x = e.clientX;
+  p.y = e.clientY;
+}
+
+function onUp(e) {
+  const p = input.pointers.get(e.pointerId);
+  if (!p) return;
+  input.pointers.delete(e.pointerId);
+
+  const held = performance.now() - p.t0;
+  const moved = Math.hypot(p.x - p.originX, p.y - p.originY);
+
+  // Hold the middle for help, at any point in the game.
+  if (p.zone === 'MENU' && held > 700 && moved < 24) {
+    tutorialStart();
+    return;
+  }
+
+  if (held < 380 && moved < 24) {
+    if (p.zone === 'EAR') {
+      Audio2.ping();
+      say('Ping');
+    } else if (p.zone === 'MENU') {
+      const now = performance.now();
+      if (now - input.lastMenu < 400) {
+        if (tilt.enabled) {
+          calibrateTilt();
+        } else {
+          resetPlayer();
+          say('Restarted');
+        }
+      } else {
+        say(tilt.enabled
+          ? 'Menu. Double tap to recalibrate tilt.'
+          : 'Menu. Double tap to start over.');
+      }
+      input.lastMenu = now;
+    }
+  }
+}
+
+input.lastMenu = -1000;
+
+function updateInput(dt) {
+  let turn = 0;
+  let hiding = false;
+  let moveFromTouch = false;
+  input.move.x = 0;
+  input.move.y = 0;
+
+  const now = performance.now();
+  const radius = stickRadius();
+
+  for (const p of input.pointers.values()) {
+    const held = now - p.t0;
+
+    if (p.zone === 'LEFT') turn -= 1;
+    if (p.zone === 'RIGHT') turn += 1;
+    if (p.zone === 'HAND' && held > 500) hiding = true;
+
+    if (p.zone === 'MOVE') {
+      moveFromTouch = true;
+      let dx = p.x - p.originX;
+      let dy = p.y - p.originY;
+      const len = Math.hypot(dx, dy);
+
+      if (len > radius) {
+        p.originX = p.x - (dx / len) * radius;
+        p.originY = p.y - (dy / len) * radius;
+        dx = (dx / len) * radius;
+        dy = (dy / len) * radius;
+      }
+
+      const strength = Math.min(1, Math.hypot(dx, dy) / radius);
+      if (strength > 0.15) {
+        const scale = 1 / Math.max(1, Math.hypot(dx, dy));
+        input.move.x = dx * scale * strength;
+        input.move.y = -dy * scale * strength; // screen up = forward
+      }
+    }
+  }
+
+  player.quiet = hiding;
+
+  // Tilt only takes over when no finger is holding the walk stick, so the two
+  // controls never fight each other.
+  if (tilt.enabled && !moveFromTouch) input.move.y += applyTilt(dt);
+
+  // keyboard, for testing on a laptop
+  if (keys.has('a')) input.move.x -= 1;
+  if (keys.has('d')) input.move.x += 1;
+  if (keys.has('w')) input.move.y += 1;
+  if (keys.has('s')) input.move.y -= 1;
+  if (keys.has('q')) turn -= 1;
+  if (keys.has('e')) turn += 1;
+  if (keys.has('c') || keys.has('control')) player.quiet = true;
+
+  const len = Math.hypot(input.move.x, input.move.y);
+  if (len > 1) { input.move.x /= len; input.move.y /= len; }
+
+  input.turn = Math.max(-1, Math.min(1, turn));
+
+  player.yaw += input.turn * CFG.turnSpeed * dt;
+}
+
+// keyboard state
+const keys = new Set();
+addEventListener('keydown', e => {
+  keys.add(e.key.toLowerCase());
+  if (e.key === ' ') { e.preventDefault(); Audio2.ping(); }
+  if (e.key === 'h') document.getElementById('zones').classList.toggle('show');
+});
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+
+// ---------------------------------------------------------------- tilt
+
+/*
+ * Tilt to walk.
+ *
+ * Two realities shape this code:
+ *
+ * 1. iOS and Chrome only deliver motion events on HTTPS, and iOS demands a
+ *    permission prompt from a real tap. So tilt can fail, and the game has to
+ *    survive that.
+ * 2. "Neutral" is different for every player and every posture. Lying in bed
+ *    and standing hold the phone at completely different angles. So neutral is
+ *    captured from whatever the phone is doing at the moment they start, and
+ *    can be recaptured from the menu.
+ */
+
+const tilt = {
+  enabled: false,
+  beta: 0,
+  gamma: 0,
+  angle: 0,
+  neutral: null,
+  smooth: 0,
+  settled: 0,     // readings averaged into the neutral angle
+  seen: 0,        // total readings received, used to detect a dead sensor
+};
+
+const TILT_DEAD = 6;      // degrees before it reads as intent
+const TILT_FULL = 26;     // degrees for full speed
+const TILT_SETTLE = 8;    // readings averaged into neutral
+
+function onOrientation(e) {
+  tilt.beta = e.beta ?? 0;
+  tilt.gamma = e.gamma ?? 0;
+  tilt.angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+  tilt.seen++;
+
+  if (tilt.settled < TILT_SETTLE) {
+    // Neutral is averaged over the first few readings, not taken from the
+    // first one: the first event after the permission prompt is often stale.
+    tilt.settled++;
+    if (!tilt.neutral) {
+      tilt.neutral = { beta: tilt.beta, gamma: tilt.gamma };
+    } else {
+      tilt.neutral.beta += (tilt.beta - tilt.neutral.beta) / tilt.settled;
+      tilt.neutral.gamma += (tilt.gamma - tilt.neutral.gamma) / tilt.settled;
+    }
+  }
+}
+
+async function requestTilt() {
+  if (!('DeviceOrientationEvent' in window)) return false;
+
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const answer = await DeviceOrientationEvent.requestPermission();
+      if (answer !== 'granted') return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  tilt.neutral = null;
+  tilt.settled = 0;
+  tilt.enabled = true;
+  addEventListener('deviceorientation', onOrientation);
+  return true;
+}
+
+function calibrateTilt() {
+  tilt.neutral = { beta: tilt.beta, gamma: tilt.gamma };
+  tilt.settled = TILT_SETTLE;
+  tilt.smooth = 0;
+  say('Calibrated');
+}
+
+/**
+ * Returns -1..1 forward speed.
+ *
+ * In portrait, tilting the top edge away from you lowers beta. In landscape the
+ * device is rolled 90 degrees, so the same motion shows up on gamma instead.
+ */
+function tiltForward() {
+  if (!tilt.enabled || !tilt.neutral) return 0;
+
+  const angle = ((Math.round(tilt.angle) % 360) + 360) % 360;
+  const landscape = angle === 90 || angle === 270;
+
+  const raw = landscape
+    ? tilt.gamma - tilt.neutral.gamma
+    : tilt.beta - tilt.neutral.beta;
+
+  return -raw;
+}
+
+function applyTilt(dt) {
+  const forward = tiltForward();
+  const magnitude = Math.abs(forward);
+
+  if (magnitude < TILT_DEAD) {
+    tilt.smooth += (0 - tilt.smooth) * Math.min(1, dt * 10);
+    return tilt.smooth;
+  }
+
+  const strength = Math.min(1, (magnitude - TILT_DEAD) / (TILT_FULL - TILT_DEAD));
+  const target = Math.sign(forward) * strength;
+
+  tilt.smooth += (target - tilt.smooth) * Math.min(1, dt * 8);
+  return tilt.smooth;
+}
+
+// ---------------------------------------------------------------- tutorial
+
+/*
+ * Nobody remembers a control scheme that was described to them once. This game
+ * has no screen to show a diagram on, so the only honest way to teach it is to
+ * ask for one action at a time and confirm when it happened.
+ *
+ * Each step either waits for a condition in the world (turned, moved, pinged,
+ * went quiet) or just runs for a few seconds. If the player is stuck, it nudges
+ * once; if they are ignoring it, it moves on. Nothing here blocks the game.
+ */
+
+const tutorial = {
+  active: false,
+  step: -1,
+  mark: null,
+  hinted: false,
+
+  steps: [
+    {
+      text: 'Headphones on. You are standing in the dark. Hold the phone still for a moment.',
+      hold: 7,
+    },
+    {
+      text: 'Turn left. Hold the top left corner of the screen.',
+      done: m => Math.abs(player.yaw - m.yaw) > 0.45,
+      hint: 'The top left corner. Hold it down.',
+      hold: 14,
+    },
+    {
+      text: 'Turn right. Top right corner.',
+      done: m => Math.abs(player.yaw - m.yaw) > 0.45,
+      hint: 'The top right corner. Hold it down.',
+      hold: 14,
+    },
+    {
+      text: () => tilt.enabled
+        ? 'Now walk. Tilt the top of the phone away from you.'
+        : 'Now walk. Drag up in the middle of the screen.',
+      done: m => Math.hypot(player.x - m.x, player.z - m.z) > 2,
+      hint: 'Try a bigger movement, slowly.',
+      hold: 16,
+    },
+    {
+      text: 'Stop and listen. That low sound is a wall. Nearer walls are louder and brighter.',
+      hold: 8,
+    },
+    {
+      text: 'Tap the bottom right corner. That is a ping. The echo tells you how far the walls are.',
+      done: m => Audio2.pingCount > m.pings,
+      hint: 'Bottom right corner. One tap.',
+      hold: 14,
+    },
+    {
+      text: 'Hold the bottom left corner to go quiet. Some things in here listen for footsteps.',
+      done: () => player.quiet,
+      hint: 'Bottom left corner. Keep holding it.',
+      hold: 12,
+    },
+    {
+      text: 'Two taps in the middle restarts or recalibrates. Hold the middle to hear all this again. Go and find your crew.',
+      hold: 9,
+    },
+  ],
+};
+
+function tutorialStart() {
+  tutorial.active = true;
+  tutorial.step = -1;
+  tutorial.advance();
+}
+
+tutorial.advance = function () {
+  this.step++;
+  const step = this.steps[this.step];
+
+  if (!step) {
+    this.active = false;
+    try { localStorage.setItem('tlc.tutorial', '1'); } catch (e) { /* private mode */ }
+    return;
+  }
+
+  this.mark = {
+    x: player.x,
+    z: player.z,
+    yaw: player.yaw,
+    pings: Audio2.pingCount,
+    t: performance.now(),
+  };
+  this.hinted = false;
+
+  say(typeof step.text === 'function' ? step.text() : step.text);
+};
+
+function updateTutorial() {
+  if (!tutorial.active) return;
+
+  const step = tutorial.steps[tutorial.step];
+  if (!step) { tutorial.active = false; return; }
+
+  const elapsed = (performance.now() - tutorial.mark.t) / 1000;
+
+  if (step.done && step.done(tutorial.mark)) {
+    tutorial.advance();
+    return;
+  }
+
+  if (elapsed > step.hold) {
+    tutorial.advance();
+    return;
+  }
+
+  if (step.hint && !tutorial.hinted && elapsed > 6) {
+    tutorial.hinted = true;
+    say(step.hint);
+  }
+}
+
+function tutorialSeen() {
+  try { return localStorage.getItem('tlc.tutorial') === '1'; }
+  catch (e) { return false; }
+}
+
+// ---------------------------------------------------------------- movement
+
+function movePlayer(dt) {
+  const speed = player.quiet ? CFG.quietSpeed : CFG.moveSpeed;
+
+  const fx = Math.sin(player.yaw);
+  const fz = -Math.cos(player.yaw);
+  const rx = Math.cos(player.yaw);
+  const rz = Math.sin(player.yaw);
+
+  let dx = (fx * input.move.y + rx * input.move.x) * speed * dt;
+  let dz = (fz * input.move.y + rz * input.move.x) * speed * dt;
+
+  // two axis-separated attempts, so you slide along walls instead of sticking
+  if (!blocked(player.x + dx, player.z)) player.x += dx; else dx = 0;
+  if (!blocked(player.x, player.z + dz)) player.z += dz; else dz = 0;
+
+  const travelled = Math.hypot(dx, dz);
+  player.speed = dt > 0 ? travelled / dt : 0;
+
+  if (travelled > 0.0001) {
+    player.walked += travelled;
+    if (player.walked >= CFG.stride) {
+      player.walked = 0;
+      Audio2.footstep(player.quiet ? 0.2 : 1);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- loop
+
+let last = 0;
+let running = false;
+
+function frame(nowMs) {
+  if (!running) return;
+
+  const now = nowMs / 1000;
+  let dt = last ? now - last : 0.016;
+  last = now;
+  if (dt > 0.1) dt = 0.1;
+
+  updateInput(dt);
+  movePlayer(dt);
+  updateTutorial();
+
+  Audio2.updateProbes(dt);
+  Audio2.updateLandmarks();
+
+  hud.textContent =
+    `x ${player.x.toFixed(1)}  z ${player.z.toFixed(1)}  yaw ${(player.yaw * 180 / Math.PI).toFixed(0)}°` +
+    (player.quiet ? '  [quiet]' : '') +
+    (tilt.enabled ? `  tilt Δ${tiltForward().toFixed(0)}° (${tilt.angle}°)` : '');
+
+  requestAnimationFrame(frame);
+}
+
+const hud = document.getElementById('hud');
+
+// ---------------------------------------------------------------- boot
+
+document.getElementById('go-drag').addEventListener('click', () => start(false));
+document.getElementById('go-tilt').addEventListener('click', () => start(true));
+
+async function start(wantTilt) {
+  // Motion permission first, and before anything is awaited: iOS only grants
+  // it while the tap is still being handled. Awaiting the audio context first
+  // loses the gesture, and the prompt is refused without ever being shown.
+  const permission = wantTilt ? requestTilt() : Promise.resolve(false);
+
+  document.getElementById('start').style.display = 'none';
+
+  Audio2.start();
+  if (Audio2.ctx.state === 'suspended') await Audio2.ctx.resume();
+
+  const tiltOk = await permission;
+
+  addEventListener('pointerdown', onDown);
+  addEventListener('pointermove', onMove);
+  addEventListener('pointerup', onUp);
+  addEventListener('pointercancel', onUp);
+
+  keepAwake(true);
+
+  if (tiltOk) {
+    // Permission can be granted and still deliver nothing - a desktop, a
+    // browser that lies, a sensor that is off. Silence is the worst possible
+    // answer, so say it out loud and keep drag available underneath.
+    const seenAtStart = tilt.seen;
+    setTimeout(() => {
+      if (running && tilt.seen === seenAtStart) {
+        tilt.enabled = false;
+        removeEventListener('deviceorientation', onOrientation);
+        say('No tilt data from this device. Drag in the middle of the screen to walk.');
+      }
+    }, 2500);
+  } else if (wantTilt) {
+    say('No tilt on this device. Drag to walk instead.');
+  } else if (tutorialSeen()) {
+    say('Drag to walk. Turn with the top corners.');
+  }
+
+  running = true;
+  last = 0;
+  requestAnimationFrame(frame);
+
+  // First launch teaches by doing. Returning players get one line and silence.
+  // Delayed so a dead tilt sensor is reported before the tutorial starts, and
+  // so the first step can tell them the truth about how to walk.
+  setTimeout(() => {
+    if (!tutorialSeen()) tutorialStart();
+  }, 3200);
+}
+
+// ---------------------------------------------------------------- app behaviour
+
+// Offline play and home-screen install. Needs HTTPS, or localhost while
+// developing; over a plain LAN address the browser will simply skip it.
+if ('serviceWorker' in navigator && isSecureContext) {
+  addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => { /* fine without it */ });
+  });
+}
+
+// Keep the screen on while playing. Android/Chrome only; iOS ignores it and
+// suspends audio when the screen locks, which no web API can prevent.
+let wakeLock = null;
+
+async function keepAwake(on) {
+  if (!('wakeLock' in navigator)) return;
+
+  try {
+    if (on && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch (e) {
+    // A refused wake lock is not an error worth interrupting the game for.
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) keepAwake(true);
+});
+
+// keep iOS from scrolling the page under our gestures
+document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+</script>
+</body>
+</html>
