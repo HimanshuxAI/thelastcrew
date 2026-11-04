@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Last Crew">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#05070a">
+<meta name="description" content="An audio maze on an alien planet. Your crew is inside. You navigate by sound.">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<title>TheLastCrew — audio maze</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; }
+  html, body {
+    height: 100%; overflow: hidden; background: #05070a; color: #cfe6ff;
+    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    touch-action: none; overscroll-behavior: none;
+  }
+  #start {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    background: radial-gradient(circle at 50% 40%, #0d1620, #05070a 70%);
+    text-align: center; padding: 24px; z-index: 10;
+  }
+  #start h1 { font-size: 20px; letter-spacing: .18em; text-transform: uppercase; font-weight: 500; color: #8fd4ff; }
+  #start p { margin: 14px auto; max-width: 34em; color: #7f9bb5; }
+  #start button {
+    margin-top: 10px; padding: 16px 42px; font: inherit; font-size: 17px;
+    background: #0e2233; color: #bfe9ff; border: 1px solid #2c5a7a; border-radius: 2px;
+    letter-spacing: .1em;
+  }
+  #start button:active { background: #123049; }
+  #hud {
+    position: fixed; left: 12px; top: 10px; font-size: 11px; color: #3f5d74;
+    pointer-events: none; white-space: pre;
+  }
+  #zones { position: fixed; inset: 0; pointer-events: none; opacity: 0; }
+  #zones.show { opacity: .5; }
+  #zones div { position: absolute; border: 1px dashed #2b4f6b; font-size: 10px; color: #4d7d9e; padding: 4px; }
+</style>
+</head>
+<body>
+
+<div id="start">
+  <div>
+    <h1>The Last Crew</h1>
+    <p><strong>Headphones on.</strong> This maze has no picture. You will hear the walls before you touch them.</p>
+    <p>Walk by dragging in the middle of the screen. Turn with the two top corners. Bottom right listens. Bottom left is your hand.</p>
+    <button id="go">Begin</button>
+  </div>
+</div>
+
+<div id="hud"></div>
+<div id="zones">
+  <div style="left:0;top:0;width:25%;height:25%">turn L</div>
+  <div style="right:0;top:0;width:25%;height:25%">turn R</div>
+  <div style="left:0;bottom:0;width:25%;height:25%">hand</div>
+  <div style="right:0;bottom:0;width:25%;height:25%">ear</div>
+  <div style="left:41%;top:41%;width:18%;height:18%">menu</div>
+</div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- config
+
+const CFG = {
+  cell: 3,
+  moveSpeed: 1.8,
+  quietSpeed: 0.6,
+  turnSpeed: Math.PI / 2,   // 90 deg per second
+  stride: 0.85,
+  radius: 0.32,
+  probeCount: 8,
+  maxRange: 5,
+  near: 0.8,
+  gridW: 19,
+  gridH: 19,
+  seed: 1234,
+};
+
+// ---------------------------------------------------------------- maze
+
+function makeMaze(w, h, seed) {
+  w = Math.max(7, w | 1);
+  h = Math.max(7, h | 1);
+
+  const solid = new Uint8Array(w * h).fill(1);
+  let s = (seed >>> 0) || 1;
+
+  function rnd() {
+    s ^= s << 13; s >>>= 0;
+    s ^= s >>> 17;
+    s ^= s << 5;  s >>>= 0;
+    return s / 4294967296;
+  }
+
+  const id = (x, y) => y * w + x;
+  const isSolid = (x, y) => (x < 0 || y < 0 || x >= w || y >= h) ? 1 : solid[id(x, y)];
+  const isOpen = (x, y) => !isSolid(x, y);
+  const set = (x, y, v) => { if (x >= 0 && y >= 0 && x < w && y < h) solid[id(x, y)] = v; };
+
+  // Recursive backtracker: rooms live on odd coordinates.
+  set(1, 1, 0);
+  const stack = [[1, 1]];
+
+  while (stack.length) {
+    const [cx, cy] = stack[stack.length - 1];
+    const cand = [];
+    for (const [dx, dy] of [[0, 2], [0, -2], [2, 0], [-2, 0]]) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx <= 0 || ny <= 0 || nx >= w - 1 || ny >= h - 1) continue;
+      if (!solid[id(nx, ny)]) continue;
+      cand.push([nx, ny]);
+    }
+    if (!cand.length) { stack.pop(); continue; }
+    const [nx, ny] = cand[(rnd() * cand.length) | 0];
+    set((cx + nx) / 2, (cy + ny) / 2, 0);
+    set(nx, ny, 0);
+    stack.push([nx, ny]);
+  }
+
+  // Loops, so it is not one long corridor of dead ends.
+  let budget = (w * h / 18) | 0;
+  for (let a = 0; a < budget * 40 && budget > 0; a++) {
+    const x = 1 + ((rnd() * (w - 2)) | 0);
+    const y = 1 + ((rnd() * (h - 2)) | 0);
+    if (isOpen(x, y)) continue;
+    const hor = isOpen(x - 1, y) && isOpen(x + 1, y) && !isOpen(x, y - 1) && !isOpen(x, y + 1);
+    const ver = isOpen(x, y - 1) && isOpen(x, y + 1) && !isOpen(x - 1, y) && !isOpen(x + 1, y);
+    if (!hor && !ver) continue;
+    set(x, y, 0);
+    budget--;
+  }
+
+  // One chamber, so the player has somewhere to orient.
+  const cx = 2 + ((rnd() * Math.max(1, w - 5)) | 0);
+  const cy = 2 + ((rnd() * Math.max(1, h - 5)) | 0);
+  for (let x = cx; x < cx + 3; x++) for (let y = cy; y < cy + 3; y++) set(x, y, 0);
+
+  return { w, h, isSolid };
+}
+
+const maze = makeMaze(CFG.gridW, CFG.gridH, CFG.seed);
+
+const halfW = maze.w * CFG.cell / 2;
+const halfH = maze.h * CFG.cell / 2;
+
+function cellAt(x, z) {
+  return [
+    Math.floor((x + halfW) / CFG.cell),
+    Math.floor((z + halfH) / CFG.cell),
+  ];
+}
+
+function solidAt(x, z) {
+  const [cx, cz] = cellAt(x, z);
+  return maze.isSolid(cx, cz) === 1;
+}
+
+function blocked(x, z) {
+  const r = CFG.radius;
+  const d = r * 0.72;
+  return solidAt(x + r, z) || solidAt(x - r, z) || solidAt(x, z + r) || solidAt(x, z - r) ||
+         solidAt(x + d, z + d) || solidAt(x + d, z - d) || solidAt(x - d, z + d) || solidAt(x - d, z - d);
+}
+
+/** Distance to the first wall along a world angle, or null. */
+function raycast(angle, range) {
+  const dx = Math.sin(angle);
+  const dz = -Math.cos(angle);
+  const step = 0.1;
+  for (let d = step; d <= range; d += step) {
+    if (solidAt(player.x + dx * d, player.z + dz * d)) return d;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- player
+
+const player = {
+  x: 0, z: 0, yaw: 0,
+  quiet: false, speed: 0, walked: CFG.stride,
+};
+
+function resetPlayer() {
+  player.x = (1 + 0.5) * CFG.cell - halfW;
+  player.z = (1 + 0.5) * CFG.cell - halfH;
+  player.yaw = 0;
+  player.walked = CFG.stride;
+}
+resetPlayer();
+
+// ---------------------------------------------------------------- audio
+
+const Audio2 = {
+  ctx: null,
+  master: null,
+  footstepBuf: null,
+  rustleBuf: null,
+  blipBuf: null,
+  probes: [],
+  echoes: [],
+  lastPing: -10,
+  landmarks: [],
+
+  start() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    this.ctx = ctx;
+
+    this.master = ctx.createGain();
+    this.master.gain.value = 0.9;
+    this.master.connect(ctx.destination);
+
+    this.footstepBuf = this.makeFootstep();
+    this.rustleBuf = this.makeRustle();
+    this.blipBuf = this.makeBlip();
+
+    this.buildProbes();
+    this.buildEchoes();
+    this.buildLandmarks();
+  },
+
+  // -- buffers ------------------------------------------------------
+
+  makeFootstep() {
+    const ctx = this.ctx;
+    const n = Math.floor(ctx.sampleRate * 0.28);
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+
+    let hp = 0, prev = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / ctx.sampleRate;
+      const noise = Math.random() * 2 - 1;
+
+      // one-pole highpass around 400 Hz
+      hp = 0.97 * (hp + noise - prev);
+      prev = noise;
+
+      const click = hp * Math.exp(-t / 0.028) * 0.55;
+      const thump = Math.sin(2 * Math.PI * 68 * t) * Math.exp(-t / 0.055) * 0.9;
+      const grit = Math.sin(2 * Math.PI * 190 * t) * Math.exp(-t / 0.02) * 0.15;
+
+      let v = click + thump + grit;
+      // fade edges so the click does not become a tick
+      const fade = Math.min(1, i / 120, (n - i) / 240);
+      d[i] = v * fade;
+    }
+    return buf;
+  },
+
+  makeRustle() {
+    const ctx = this.ctx;
+    const seconds = 3;
+    const n = Math.floor(ctx.sampleRate * seconds);
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+
+    let lp = 0, hp = 0, prev = 0;
+    const aLow = 1 - Math.exp(-2 * Math.PI * 5200 / ctx.sampleRate);
+    const aHigh = 1 - Math.exp(-2 * Math.PI * 750 / ctx.sampleRate);
+
+    for (let i = 0; i < n; i++) {
+      const noise = Math.random() * 2 - 1;
+      lp += aLow * (noise - lp);
+      hp += aHigh * (lp - hp);
+      const band = lp - hp;
+
+      const t = i / ctx.sampleRate;
+      const env = 0.55
+        + 0.22 * Math.sin(2 * Math.PI * (1 / seconds) * t)
+        + 0.13 * Math.sin(2 * Math.PI * (3 / seconds) * t + 1.1)
+        + 0.08 * Math.sin(2 * Math.PI * (7 / seconds) * t + 2.3);
+
+      d[i] = band * env;
+    }
+
+    // normalise around 0.6
+    let peak = 0;
+    for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(d[i]));
+    const g = peak > 0 ? 0.6 / peak : 1;
+    for (let i = 0; i < n; i++) d[i] *= g;
+
+    return buf;
+  },
+
+  makeBlip() {
+    const ctx = this.ctx;
+    const n = Math.floor(ctx.sampleRate * 0.12);
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    let lp = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / ctx.sampleRate;
+      const noise = Math.random() * 2 - 1;
+      lp += 0.35 * (noise - lp);
+      d[i] = lp * Math.exp(-t / 0.02) * 0.9;
+    }
+    return buf;
+  },
+
+  // -- helpers ------------------------------------------------------
+
+  panner(pos) {
+    const ctx = this.ctx;
+    const p = ctx.createPanner();
+    p.panningModel = 'HRTF';
+    p.distanceModel = 'linear';
+    p.refDistance = pos.ref || CFG.near;
+    p.maxDistance = pos.max || CFG.maxRange;
+    p.rolloffFactor = 1;
+    if (p.positionX) {
+      p.positionX.value = pos.x || 0;
+      p.positionY.value = 0;
+      p.positionZ.value = pos.z || 0;
+    } else if (p.setPosition) {
+      p.setPosition(pos.x || 0, 0, pos.z || 0);
+    }
+    p.connect(this.master);
+    return p;
+  },
+
+  setPos(p, x, z) {
+    if (p.positionX) {
+      p.positionX.value = x;
+      p.positionZ.value = z;
+    } else if (p.setPosition) {
+      p.setPosition(x, 0, z);
+    }
+  },
+
+  // -- the maze voice ----------------------------------------------
+
+  buildProbes() {
+    const ctx = this.ctx;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.rustleBuf;
+    src.loop = true;
+    src.start();
+
+    for (let i = 0; i < CFG.probeCount; i++) {
+      const angle = i * 2 * Math.PI / CFG.probeCount;
+      const gain = ctx.createGain();
+      gain.gain.value = 0;
+
+      const p = this.panner({ ref: CFG.near, max: CFG.maxRange });
+
+      src.connect(gain);
+      gain.connect(p);
+
+      this.probes.push({
+        angle,
+        gain,
+        panner: p,
+        dist: CFG.maxRange,
+      });
+    }
+  },
+
+  /** Called every frame. Body-relative panner positions: turning is listening. */
+  updateProbes(dt) {
+    const now = this.ctx.currentTime;
+
+    for (const probe of this.probes) {
+      const worldAngle = player.yaw + probe.angle;
+      const dist = raycast(worldAngle, CFG.maxRange);
+
+      let target = 0;
+      if (dist !== null) {
+        target = Math.max(0, Math.min(1, 1 - (dist - CFG.near) / (CFG.maxRange - CFG.near))) * 0.5;
+      }
+
+      probe.gain.gain.setTargetAtTime(target, now, 0.07);
+
+      const d = dist === null ? CFG.maxRange : dist;
+      if (Math.abs(d - probe.dist) > 0.01 || true) {
+        this.setPos(probe.panner, Math.sin(probe.angle) * d, -Math.cos(probe.angle) * d);
+        probe.dist = d;
+      }
+    }
+  },
+
+  // -- landmarks ----------------------------------------------------
+
+  buildLandmarks() {
+    const ctx = this.ctx;
+
+    const spots = [
+      { x: (maze.w - 1.5) * CFG.cell - halfW, z: 1.5 * CFG.cell - halfH, pitch: 55 },
+      { x: 1.5 * CFG.cell - halfW, z: (maze.h - 1.5) * CFG.cell - halfH, pitch: 82.5 },
+    ];
+
+    for (const spot of spots) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = spot.pitch;
+
+      const osc2 = ctx.createOscillator();
+      osc2.type = 'sine';
+      osc2.frequency.value = spot.pitch * 1.5;
+
+      const g = ctx.createGain();
+      g.gain.value = 0.12;
+
+      const p = this.panner({ ref: 2, max: 18 });
+
+      osc.connect(g);
+      osc2.connect(g);
+      g.connect(p);
+      osc.start();
+      osc2.start();
+
+      // Bend so the two landmarks are distinguishable identities.
+      this.landmarks.push({ x: spot.x, z: spot.z, panner: p });
+    }
+  },
+
+  updateLandmarks() {
+    const cos = Math.cos(player.yaw);
+    const sin = Math.sin(player.yaw);
+
+    for (const l of this.landmarks) {
+      const dx = l.x - player.x;
+      const dz = l.z - player.z;
+
+      // rotate world offset into listener space
+      const right = dx * cos + dz * sin;
+      const fwd = dx * sin - dz * cos;
+      this.setPos(l.panner, right, -fwd);
+    }
+  },
+
+  // -- footsteps ----------------------------------------------------
+
+  footstep(loud) {
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = this.footstepBuf;
+    src.playbackRate.value = 0.92 + Math.random() * 0.16;
+
+    const g = ctx.createGain();
+    g.gain.value = 0.7 * loud;
+
+    src.connect(g);
+    g.connect(this.master);
+    src.start();
+    src.stop(ctx.currentTime + 0.35);
+  },
+
+  // -- ping ---------------------------------------------------------
+
+  buildEchoes() {
+    const n = 16;
+    for (let i = 0; i < n; i++) {
+      const angle = i * 2 * Math.PI / n;
+      const p = this.panner({ ref: 1, max: 22 });
+      this.echoes.push({ angle, panner: p });
+    }
+  },
+
+  ping() {
+    const ctx = this.ctx;
+    if (!ctx) return false;
+    const now = ctx.currentTime;
+    if (now - this.lastPing < 2) return false;
+    this.lastPing = now;
+
+    // the outgoing pulse
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1500, now);
+    osc.frequency.exponentialRampToValueAtTime(620, now + 0.09);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.22, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+
+    osc.connect(g);
+    g.connect(this.master);
+    osc.start(now);
+    osc.stop(now + 0.25);
+
+    // what comes back
+    let hits = 0;
+    for (const echo of this.echoes) {
+      const dist = raycast(player.yaw + echo.angle, 14);
+      if (dist === null) continue;
+      hits++;
+
+      this.setPos(echo.panner, Math.sin(echo.angle) * dist, -Math.cos(echo.angle) * dist);
+
+      const when = now + 0.02 + dist * 0.022;
+      const src = ctx.createBufferSource();
+      src.buffer = this.blipBuf;
+      src.playbackRate.value = 0.9 + Math.random() * 0.2;
+      src.connect(echo.panner);
+      src.start(when);
+      src.stop(when + 0.15);
+    }
+
+    if (navigator.vibrate) navigator.vibrate(hits > 6 ? [18, 40, 18] : 18);
+    return true;
+  },
+};
+
+// ---------------------------------------------------------------- speech
+
+let voice = null;
+
+function say(text) {
+  if (!text || !('speechSynthesis' in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.25;
+    u.volume = 0.95;
+    if (!voice) {
+      const all = speechSynthesis.getVoices();
+      voice = all.find(v => /en[-_]/.test(v.lang)) || all[0] || null;
+    }
+    if (voice) u.voice = voice;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  } catch (e) { /* speech is optional */ }
+}
+
+// ---------------------------------------------------------------- input
+
+const input = {
+  move: { x: 0, y: 0 },
+  turn: 0,
+  pointers: new Map(),
+};
+
+const ZONE = {
+  LEFT: 'Turn left',
+  RIGHT: 'Turn right',
+  HAND: 'Hand',
+  EAR: 'Ear',
+  MENU: 'Menu',
+  MOVE: '',
+};
+
+function zoneAt(nx, ny) {
+  if (nx <= 0.25 && ny <= 0.25) return 'LEFT';
+  if (nx >= 0.75 && ny <= 0.25) return 'RIGHT';
+  if (nx <= 0.25 && ny >= 0.75) return 'HAND';
+  if (nx >= 0.75 && ny >= 0.75) return 'EAR';
+  if (Math.abs(nx - 0.5) <= 0.18 && Math.abs(ny - 0.5) <= 0.18) return 'MENU';
+  return 'MOVE';
+}
+
+const stickRadius = () => 0.12 * window.innerHeight;
+
+function onDown(e) {
+  const nx = e.clientX / window.innerWidth;
+  const ny = e.clientY / window.innerHeight;
+  const zone = zoneAt(nx, ny);
+
+  input.pointers.set(e.pointerId, {
+    zone,
+    originX: e.clientX,
+    originY: e.clientY,
+    x: e.clientX,
+    y: e.clientY,
+    t0: performance.now(),
+    held: false,
+  });
+
+  const name = ZONE[zone];
+  if (name) say(name);
+}
+
+function onMove(e) {
+  const p = input.pointers.get(e.pointerId);
+  if (!p) return;
+  p.x = e.clientX;
+  p.y = e.clientY;
+}
+
+function onUp(e) {
+  const p = input.pointers.get(e.pointerId);
+  if (!p) return;
+  input.pointers.delete(e.pointerId);
+
+  const held = performance.now() - p.t0;
+  const moved = Math.hypot(p.x - p.originX, p.y - p.originY);
+
+  if (held < 380 && moved < 24) {
+    if (p.zone === 'EAR') {
+      Audio2.ping();
+      say('Ping');
+    } else if (p.zone === 'MENU') {
+      const now = performance.now();
+      if (now - input.lastMenu < 400) {
+        resetPlayer();
+        say('Restarted');
+      } else {
+        say('Menu. Double tap to start over.');
+      }
+      input.lastMenu = now;
+    }
+  }
+}
+
+input.lastMenu = -1000;
+
+function updateInput(dt) {
+  let turn = 0;
+  let hiding = false;
+  input.move.x = 0;
+  input.move.y = 0;
+
+  const now = performance.now();
+  const radius = stickRadius();
+
+  for (const p of input.pointers.values()) {
+    const held = now - p.t0;
+
+    if (p.zone === 'LEFT') turn -= 1;
+    if (p.zone === 'RIGHT') turn += 1;
+    if (p.zone === 'HAND' && held > 500) hiding = true;
+
+    if (p.zone === 'MOVE') {
+      let dx = p.x - p.originX;
+      let dy = p.y - p.originY;
+      const len = Math.hypot(dx, dy);
+
+      if (len > radius) {
+        p.originX = p.x - (dx / len) * radius;
+        p.originY = p.y - (dy / len) * radius;
+        dx = (dx / len) * radius;
+        dy = (dy / len) * radius;
+      }
+
+      const strength = Math.min(1, Math.hypot(dx, dy) / radius);
+      if (strength > 0.15) {
+        const scale = 1 / Math.max(1, Math.hypot(dx, dy));
+        input.move.x = dx * scale * strength;
+        input.move.y = -dy * scale * strength; // screen up = forward
+      }
+    }
+  }
+
+  player.quiet = hiding;
+
+  // keyboard, for testing on a laptop
+  if (keys.has('a')) input.move.x -= 1;
+  if (keys.has('d')) input.move.x += 1;
+  if (keys.has('w')) input.move.y += 1;
+  if (keys.has('s')) input.move.y -= 1;
+  if (keys.has('q')) turn -= 1;
+  if (keys.has('e')) turn += 1;
+  if (keys.has('c') || keys.has('control')) player.quiet = true;
+
+  const len = Math.hypot(input.move.x, input.move.y);
+  if (len > 1) { input.move.x /= len; input.move.y /= len; }
+
+  input.turn = Math.max(-1, Math.min(1, turn));
+
+  player.yaw += input.turn * CFG.turnSpeed * dt;
+}
+
+// keyboard state
+const keys = new Set();
+addEventListener('keydown', e => {
+  keys.add(e.key.toLowerCase());
+  if (e.key === ' ') { e.preventDefault(); Audio2.ping(); }
+  if (e.key === 'h') document.getElementById('zones').classList.toggle('show');
+});
+addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+
+// ---------------------------------------------------------------- movement
+
+function movePlayer(dt) {
+  const speed = player.quiet ? CFG.quietSpeed : CFG.moveSpeed;
+
+  const fx = Math.sin(player.yaw);
+  const fz = -Math.cos(player.yaw);
+  const rx = Math.cos(player.yaw);
+  const rz = Math.sin(player.yaw);
+
+  let dx = (fx * input.move.y + rx * input.move.x) * speed * dt;
+  let dz = (fz * input.move.y + rz * input.move.x) * speed * dt;
+
+  // two axis-separated attempts, so you slide along walls instead of sticking
+  if (!blocked(player.x + dx, player.z)) player.x += dx; else dx = 0;
+  if (!blocked(player.x, player.z + dz)) player.z += dz; else dz = 0;
+
+  const travelled = Math.hypot(dx, dz);
+  if (travelled > 0.0001) {
+    player.walked += travelled;
+    if (player.walked >= CFG.stride) {
+      player.walked = 0;
+      Audio2.footstep(player.quiet ? 0.2 : 1);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- loop
+
+let last = 0;
+let running = false;
+
+function frame(nowMs) {
+  if (!running) return;
+
+  const now = nowMs / 1000;
+  let dt = last ? now - last : 0.016;
+  last = now;
+  if (dt > 0.1) dt = 0.1;
+
+  updateInput(dt);
+  movePlayer(dt);
+
+  Audio2.updateProbes(dt);
+  Audio2.updateLandmarks();
+
+  hud.textContent =
+    `x ${player.x.toFixed(1)}  z ${player.z.toFixed(1)}  yaw ${(player.yaw * 180 / Math.PI).toFixed(0)}°` +
+    (player.quiet ? '  [quiet]' : '');
+
+  requestAnimationFrame(frame);
+}
+
+const hud = document.getElementById('hud');
+
+// ---------------------------------------------------------------- boot
+
+document.getElementById('go').addEventListener('click', async () => {
+  document.getElementById('start').style.display = 'none';
+
+  Audio2.start();
+  if (Audio2.ctx.state === 'suspended') await Audio2.ctx.resume();
+
+  addEventListener('pointerdown', onDown);
+  addEventListener('pointermove', onMove);
+  addEventListener('pointerup', onUp);
+  addEventListener('pointercancel', onUp);
+
+  keepAwake(true);
+
+  say('Headphones. Walk to hear the walls.');
+
+  running = true;
+  last = 0;
+  requestAnimationFrame(frame);
+});
+
+// ---------------------------------------------------------------- app behaviour
+
+// Offline play and home-screen install. Needs HTTPS, or localhost while
+// developing; over a plain LAN address the browser will simply skip it.
+if ('serviceWorker' in navigator && isSecureContext) {
+  addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => { /* fine without it */ });
+  });
+}
+
+// Keep the screen on while playing. Android/Chrome only; iOS ignores it and
+// suspends audio when the screen locks, which no web API can prevent.
+let wakeLock = null;
+
+async function keepAwake(on) {
+  if (!('wakeLock' in navigator)) return;
+
+  try {
+    if (on && !wakeLock) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch (e) {
+    // A refused wake lock is not an error worth interrupting the game for.
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) keepAwake(true);
+});
+
+// keep iOS from scrolling the page under our gestures
+document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+</script>
+</body>
+</html>
