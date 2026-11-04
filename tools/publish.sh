@@ -3,12 +3,14 @@
 #
 #   ./tools/publish.sh "what changed"
 #
-# Bumps the service worker cache, commits everything, pushes, and lets GitHub
-# Actions deploy. Live in about 45 seconds.
+# Two things happen:
+#   1. the service worker cache version is bumped (skip this and your phone
+#      keeps running the old build),
+#   2. the contents of web/ are pushed to the gh-pages branch, which is what
+#      GitHub Pages serves.
 #
-# The cache bump is the whole point of this script: forget it once and your
-# phone keeps running the old build, and you spend an hour debugging code that
-# was already fixed.
+# No GitHub Actions involved: it deploys straight from your machine in about
+# ten seconds, and it cannot get stuck in a runner queue.
 
 set -e
 cd "$(dirname "$0")/.."
@@ -31,17 +33,33 @@ else:
     print("warning: could not find CACHE version in web/sw.js")
 PY
 
+# 1. Source repository
 git add -A
-
-if git diff --cached --quiet; then
-    echo "nothing to publish"
-    exit 0
+if ! git diff --cached --quiet; then
+    git commit -q -m "$MSG"
+    git push -q origin main
+    echo "source pushed"
+else
+    echo "source: nothing to commit"
 fi
 
-git commit -q -m "$MSG"
-git push -q origin main
+# 2. Published site: web/ becomes the root of the gh-pages branch
+REMOTE="$(git remote get-url origin)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
-echo "pushed: $MSG"
-echo "live in ~45s: https://himanshuxai.github.io/thelastcrew/"
+cp -R web/. "$TMP"/
+
+(
+    cd "$TMP"
+    git init -q
+    git checkout -q -b gh-pages
+    git add -A
+    git -c commit.gpgsign=false commit -q -m "$MSG"
+    git push -q --force "$REMOTE" gh-pages
+)
+
+echo "published: $MSG"
+echo "live: https://himanshuxai.github.io/thelastcrew/"
 echo ""
 echo "On the phone: close the app fully and reopen it to pick up the new build."
