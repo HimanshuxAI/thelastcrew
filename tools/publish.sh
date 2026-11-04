@@ -3,19 +3,21 @@
 #
 #   ./tools/publish.sh "what changed"
 #
-# Two things happen:
+# Three things happen:
 #   1. the service worker cache version is bumped (skip this and your phone
 #      keeps running the old build),
-#   2. the contents of web/ are pushed to the gh-pages branch, which is what
-#      GitHub Pages serves.
+#   2. the source is committed and pushed to origin/main,
+#   3. web/ is deployed to Cloudflare Pages.
 #
-# No GitHub Actions involved: it deploys straight from your machine in about
-# ten seconds, and it cannot get stuck in a runner queue.
+# Cloudflare Pages is used instead of GitHub Pages because it deploys in a few
+# seconds with no build queue, and it keeps working when the repo is private
+# (GitHub Pages needs a paid plan for that).
 
 set -e
 cd "$(dirname "$0")/.."
 
 MSG="${1:-Update}"
+PROJECT="thelastcrew"
 
 python3 - <<'PY'
 import re
@@ -33,7 +35,7 @@ else:
     print("warning: could not find CACHE version in web/sw.js")
 PY
 
-# 1. Source repository
+# 1. Source
 git add -A
 if ! git diff --cached --quiet; then
     git commit -q -m "$MSG"
@@ -43,23 +45,14 @@ else
     echo "source: nothing to commit"
 fi
 
-# 2. Published site: web/ becomes the root of the gh-pages branch
-REMOTE="$(git remote get-url origin)"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# 2. Site
+echo "deploying to Cloudflare Pages..."
+npx --yes wrangler pages deploy web \
+    --project-name "$PROJECT" \
+    --branch main \
+    --commit-dirty=true 2>&1 | grep -E "Success|Deployment complete|error|Error" || true
 
-cp -R web/. "$TMP"/
-
-(
-    cd "$TMP"
-    git init -q
-    git checkout -q -b gh-pages
-    git add -A
-    git -c commit.gpgsign=false commit -q -m "$MSG"
-    git push -q --force "$REMOTE" gh-pages
-)
-
-echo "published: $MSG"
-echo "live: https://himanshuxai.github.io/thelastcrew/"
+echo ""
+echo "live: https://$PROJECT.pages.dev"
 echo ""
 echo "On the phone: close the app fully and reopen it to pick up the new build."
