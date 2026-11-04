@@ -30,6 +30,25 @@ reload itself.
 
 ---
 
+## Movement modes
+
+The start screen offers two ways to walk:
+
+| Mode | How it works | Good for |
+|---|---|---|
+| **Drag** | put a thumb anywhere in the middle and slide; the stick appears under your finger | sitting, lying down, any posture, one hand |
+| **Tilt** | lean the phone forward to walk, back to reverse | standing, holding the phone up |
+
+Tilt needs motion permission (iOS asks once) and **only works over HTTPS** — the
+browser refuses motion events on a plain `http://` LAN address. Neutral angle is
+captured when you start; **double-tap the centre** to recalibrate if you change
+posture.
+
+There is no strafing on tilt: sideways movement in a maze you cannot see is how
+you walk into walls. Turning is always the two top corners.
+
+---
+
 ## Installing it on a phone
 
 The game is a Progressive Web App: it can live on the home screen, open

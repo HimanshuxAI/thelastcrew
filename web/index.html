@@ -29,11 +29,13 @@
   #start h1 { font-size: 20px; letter-spacing: .18em; text-transform: uppercase; font-weight: 500; color: #8fd4ff; }
   #start p { margin: 14px auto; max-width: 34em; color: #7f9bb5; }
   #start button {
-    margin-top: 10px; padding: 16px 42px; font: inherit; font-size: 17px;
+    margin-top: 10px; padding: 16px 28px; font: inherit; font-size: 16px;
     background: #0e2233; color: #bfe9ff; border: 1px solid #2c5a7a; border-radius: 2px;
-    letter-spacing: .1em;
+    letter-spacing: .08em;
   }
   #start button:active { background: #123049; }
+  #start .modes { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  #start .sub { font-size: 12px; color: #5c7891; margin-top: 20px; }
   #hud {
     position: fixed; left: 12px; top: 10px; font-size: 11px; color: #3f5d74;
     pointer-events: none; white-space: pre;
@@ -49,8 +51,11 @@
   <div>
     <h1>The Last Crew</h1>
     <p><strong>Headphones on.</strong> This maze has no picture. You will hear the walls before you touch them.</p>
-    <p>Walk by dragging in the middle of the screen. Turn with the two top corners. Bottom right listens. Bottom left is your hand.</p>
-    <button id="go">Begin</button>
+    <div class="modes">
+      <button id="go-drag">Drag to walk</button>
+      <button id="go-tilt">Tilt to walk</button>
+    </div>
+    <p class="sub">Both use the same corners: top-left and top-right turn, bottom-right listens, bottom-left is your hand.</p>
   </div>
 </div>
 
@@ -599,10 +604,16 @@ function onUp(e) {
     } else if (p.zone === 'MENU') {
       const now = performance.now();
       if (now - input.lastMenu < 400) {
-        resetPlayer();
-        say('Restarted');
+        if (tilt.enabled) {
+          calibrateTilt();
+        } else {
+          resetPlayer();
+          say('Restarted');
+        }
       } else {
-        say('Menu. Double tap to start over.');
+        say(tilt.enabled
+          ? 'Menu. Double tap to recalibrate tilt.'
+          : 'Menu. Double tap to start over.');
       }
       input.lastMenu = now;
     }
@@ -614,6 +625,7 @@ input.lastMenu = -1000;
 function updateInput(dt) {
   let turn = 0;
   let hiding = false;
+  let moveFromTouch = false;
   input.move.x = 0;
   input.move.y = 0;
 
@@ -628,6 +640,7 @@ function updateInput(dt) {
     if (p.zone === 'HAND' && held > 500) hiding = true;
 
     if (p.zone === 'MOVE') {
+      moveFromTouch = true;
       let dx = p.x - p.originX;
       let dy = p.y - p.originY;
       const len = Math.hypot(dx, dy);
@@ -649,6 +662,10 @@ function updateInput(dt) {
   }
 
   player.quiet = hiding;
+
+  // Tilt only takes over when no finger is holding the walk stick, so the two
+  // controls never fight each other.
+  if (tilt.enabled && !moveFromTouch) input.move.y += applyTilt(dt);
 
   // keyboard, for testing on a laptop
   if (keys.has('a')) input.move.x -= 1;
@@ -675,6 +692,102 @@ addEventListener('keydown', e => {
   if (e.key === 'h') document.getElementById('zones').classList.toggle('show');
 });
 addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+
+// ---------------------------------------------------------------- tilt
+
+/*
+ * Tilt to walk.
+ *
+ * Two realities shape this code:
+ *
+ * 1. iOS and Chrome only deliver motion events on HTTPS, and iOS demands a
+ *    permission prompt from a real tap. So tilt can fail, and the game has to
+ *    survive that.
+ * 2. "Neutral" is different for every player and every posture. Lying in bed
+ *    and standing hold the phone at completely different angles. So neutral is
+ *    captured from whatever the phone is doing at the moment they start, and
+ *    can be recaptured from the menu.
+ */
+
+const tilt = {
+  enabled: false,
+  beta: 0,
+  gamma: 0,
+  angle: 0,
+  neutral: null,
+  smooth: 0,
+};
+
+const TILT_DEAD = 6;    // degrees before it reads as intent
+const TILT_FULL = 26;   // degrees for full speed
+
+function onOrientation(e) {
+  tilt.beta = e.beta ?? 0;
+  tilt.gamma = e.gamma ?? 0;
+  tilt.angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+
+  // First reading after starting becomes neutral.
+  if (!tilt.neutral) tilt.neutral = { beta: tilt.beta, gamma: tilt.gamma };
+}
+
+async function requestTilt() {
+  if (!('DeviceOrientationEvent' in window)) return false;
+
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const answer = await DeviceOrientationEvent.requestPermission();
+      if (answer !== 'granted') return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  tilt.neutral = null;
+  tilt.enabled = true;
+  addEventListener('deviceorientation', onOrientation);
+  return true;
+}
+
+function calibrateTilt() {
+  tilt.neutral = { beta: tilt.beta, gamma: tilt.gamma };
+  tilt.smooth = 0;
+  say('Calibrated');
+}
+
+/**
+ * Returns -1..1 forward speed.
+ *
+ * In portrait, tilting the top edge away from you lowers beta. In landscape the
+ * device is rolled 90 degrees, so the same motion shows up on gamma instead.
+ */
+function tiltForward() {
+  if (!tilt.enabled || !tilt.neutral) return 0;
+
+  const angle = ((Math.round(tilt.angle) % 360) + 360) % 360;
+  const landscape = angle === 90 || angle === 270;
+
+  const raw = landscape
+    ? tilt.gamma - tilt.neutral.gamma
+    : tilt.beta - tilt.neutral.beta;
+
+  return -raw;
+}
+
+function applyTilt(dt) {
+  const forward = tiltForward();
+  const magnitude = Math.abs(forward);
+
+  if (magnitude < TILT_DEAD) {
+    tilt.smooth += (0 - tilt.smooth) * Math.min(1, dt * 10);
+    return tilt.smooth;
+  }
+
+  const strength = Math.min(1, (magnitude - TILT_DEAD) / (TILT_FULL - TILT_DEAD));
+  const target = Math.sign(forward) * strength;
+
+  tilt.smooth += (target - tilt.smooth) * Math.min(1, dt * 8);
+  return tilt.smooth;
+}
 
 // ---------------------------------------------------------------- movement
 
@@ -724,7 +837,8 @@ function frame(nowMs) {
 
   hud.textContent =
     `x ${player.x.toFixed(1)}  z ${player.z.toFixed(1)}  yaw ${(player.yaw * 180 / Math.PI).toFixed(0)}°` +
-    (player.quiet ? '  [quiet]' : '');
+    (player.quiet ? '  [quiet]' : '') +
+    (tilt.enabled ? `  tilt Δ${tiltForward().toFixed(0)}° (${tilt.angle}°)` : '');
 
   requestAnimationFrame(frame);
 }
@@ -733,11 +847,17 @@ const hud = document.getElementById('hud');
 
 // ---------------------------------------------------------------- boot
 
-document.getElementById('go').addEventListener('click', async () => {
+document.getElementById('go-drag').addEventListener('click', () => start(false));
+document.getElementById('go-tilt').addEventListener('click', () => start(true));
+
+async function start(wantTilt) {
   document.getElementById('start').style.display = 'none';
 
   Audio2.start();
   if (Audio2.ctx.state === 'suspended') await Audio2.ctx.resume();
+
+  let tiltOk = false;
+  if (wantTilt) tiltOk = await requestTilt();
 
   addEventListener('pointerdown', onDown);
   addEventListener('pointermove', onMove);
@@ -746,12 +866,18 @@ document.getElementById('go').addEventListener('click', async () => {
 
   keepAwake(true);
 
-  say('Headphones. Walk to hear the walls.');
+  if (tiltOk) {
+    say('Tilt forward to walk. Turn with the top corners. Double tap the middle to recalibrate.');
+  } else if (wantTilt) {
+    say('Tilt is not available here. Drag to walk instead.');
+  } else {
+    say('Drag to walk. Turn with the top corners.');
+  }
 
   running = true;
   last = 0;
   requestAnimationFrame(frame);
-});
+}
 
 // ---------------------------------------------------------------- app behaviour
 
