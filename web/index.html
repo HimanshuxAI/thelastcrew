@@ -38,6 +38,7 @@
   #start button.primary:active { background: #1d5277; }
   #start .modes { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
   #start .sub { font-size: 12px; color: #5c7891; margin-top: 20px; }
+  #start .goal { font-size: 13px; color: #8fb6cf; border-left: 2px solid #2c5a7a; padding-left: 10px; text-align: left; }
   #hud {
     position: fixed; left: 12px; top: 10px; font-size: 11px; color: #3f5d74;
     pointer-events: none; white-space: pre;
@@ -53,6 +54,7 @@
   <div>
     <h1>The Last Crew</h1>
     <p><strong>Headphones on.</strong> This maze has no picture. You will hear the walls before you touch them.</p>
+    <p class="goal">Three crew are lost inside. Their beacons are pulsing. Find all three, then get back out.</p>
     <div class="modes">
       <button id="go-tilt" class="primary">Tilt to walk</button>
       <button id="go-drag">Drag instead</button>
@@ -202,6 +204,60 @@ function resetPlayer() {
 }
 resetPlayer();
 
+// ---------------------------------------------------------------- crew
+
+/*
+ * Three crew, placed as far apart as the maze allows: the one farthest from the
+ * start, then the one farthest from everybody already placed. Deterministic, so
+ * the same maze always holds the same three people.
+ */
+
+function placeCrew() {
+  const startX = 1.5 * CFG.cell - halfW;
+  const startZ = 1.5 * CFG.cell - halfH;
+
+  const open = [];
+  for (let gy = 1; gy < maze.h; gy += 2) {
+    for (let gx = 1; gx < maze.w; gx += 2) {
+      if (maze.isSolid(gx, gy)) continue;
+      const x = (gx + 0.5) * CFG.cell - halfW;
+      const z = (gy + 0.5) * CFG.cell - halfH;
+
+      // Close enough to find without wandering for ten minutes, far enough that
+      // the beacon has to be followed rather than stumbled into. Straight-line
+      // distance understates the walk in a maze, by roughly a factor of two.
+      const d = Math.hypot(x - startX, z - startZ);
+      if (d < 14 || d > 34) continue;
+
+      open.push({ x, z });
+    }
+  }
+
+  const chosen = [];
+  while (chosen.length < 3 && open.length) {
+    let best = 0;
+    let bestScore = -1;
+
+    for (let i = 0; i < open.length; i++) {
+      const p = open[i];
+      let score = Math.hypot(p.x - startX, p.z - startZ);
+      for (const c of chosen) score = Math.min(score, Math.hypot(p.x - c.x, p.z - c.z));
+      if (score > bestScore) { bestScore = score; best = i; }
+    }
+
+    chosen.push(open.splice(best, 1)[0]);
+  }
+
+  return chosen;
+}
+
+const crew = {
+  total: 3,
+  rescued: 0,
+  startedAt: 0,
+  done: false,
+};
+
 // ---------------------------------------------------------------- audio
 
 const Audio2 = {
@@ -216,6 +272,8 @@ const Audio2 = {
   probes: [],
   echoes: [],
   landmarks: [],
+  crew: [],
+  exit: null,
   lastPing: -10,
   pingCount: 0,
 
@@ -264,6 +322,7 @@ const Audio2 = {
     this.buildProbes();
     this.buildEchoes();
     this.buildLandmarks();
+    this.buildCrew(placeCrew());
   },
 
   // -- buffers ------------------------------------------------------
@@ -549,6 +608,115 @@ const Audio2 = {
     }
   },
 
+  // -- crew beacons ---------------------------------------------------
+
+  /*
+   * A beacon has to be findable from the far side of the maze, so it does not
+   * respect walls: it is a radio signal, not a sound. Two things carry the
+   * information - direction from the HRTF panner, and distance from how often
+   * it pulses. Close beacons are urgent; far ones are patient.
+   */
+
+  buildCrew(spots) {
+    this.crew = spots.map((spot, i) => ({
+      ...spot,
+      pitch: [392, 466, 349][i % 3],
+      rescued: false,
+      nextAt: this.ctx.currentTime + 1 + i * 1.7,
+      panner: this.panner({ ref: 1, max: 60, roll: 0.25 }),
+    }));
+
+    this.exit = null;
+  },
+
+  updateCrew(dt) {
+    const ctx = this.ctx;
+    const cos = Math.cos(player.yaw);
+    const sin = Math.sin(player.yaw);
+
+    for (const m of this.crew || []) {
+      if (m.rescued) continue;
+
+      const dx = m.x - player.x;
+      const dz = m.z - player.z;
+      this.setPos(m.panner, dx * cos + dz * sin, -(dx * sin - dz * cos));
+
+      const dist = Math.hypot(dx, dz);
+      if (ctx.currentTime >= m.nextAt) {
+        this.crewPulse(m.panner, m.pitch, 0.55);
+        m.nextAt = ctx.currentTime + Math.max(0.75, Math.min(2.8, 0.55 + dist * 0.1));
+      }
+    }
+
+    if (this.exit && !this.exit.reached) {
+      const dx = this.exit.x - player.x;
+      const dz = this.exit.z - player.z;
+      this.setPos(this.exit.panner, dx * cos + dz * sin, -(dx * sin - dz * cos));
+
+      const dist = Math.hypot(dx, dz);
+      if (ctx.currentTime >= this.exit.nextAt) {
+        this.crewPulse(this.exit.panner, 196, 0.5);
+        this.exit.nextAt = ctx.currentTime + Math.max(0.8, Math.min(3, 0.5 + dist * 0.1));
+      }
+    }
+  },
+
+  crewPulse(dest, pitch, loud) {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    // Two notes, the second a fifth up: a sonar chirp, not a ringtone.
+    for (const [mult, delay, dur] of [[1, 0, 0.30], [1.5, 0.15, 0.42]]) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = pitch * mult;
+
+      const g = ctx.createGain();
+      const t0 = now + delay;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(loud, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+
+      osc.connect(g);
+      g.connect(dest);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.05);
+    }
+  },
+
+  makeExit(x, z) {
+    this.exit = {
+      x, z,
+      reached: false,
+      nextAt: this.ctx.currentTime,
+      panner: this.panner({ ref: 1, max: 60, roll: 0.25 }),
+    };
+  },
+
+  /** Rising two-note chime: someone is alive and you found them. */
+  rescueChime() {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+
+    [523.25, 783.99].forEach((f, i) => {
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = f;
+
+      const g = ctx.createGain();
+      const t0 = now + i * 0.13;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.22, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.9);
+
+      osc.connect(g);
+      g.connect(this.master);
+      g.connect(this.reverb);
+      osc.start(t0);
+      osc.stop(t0 + 1);
+    });
+  },
+
   // -- footsteps ----------------------------------------------------
 
   footstep(loud) {
@@ -560,10 +728,43 @@ const Audio2 = {
     const g = ctx.createGain();
     g.gain.value = 0.55 * loud;
 
+    // Alternate feet slightly across the head. It is a small lie that makes
+    // walking feel like a body instead of a floating camera.
+    this.stepSide = -(this.stepSide || 1);
+    const pan = ctx.createStereoPanner();
+    pan.pan.value = this.stepSide * 0.17;
+
     src.connect(g);
-    g.connect(this.master);
+    g.connect(pan);
+    pan.connect(this.master);
+    pan.connect(this.reverb);
     src.start();
     src.stop(ctx.currentTime + 0.4);
+  },
+
+  /** Walking into a wall. No sound for this is why the maze felt weightless. */
+  bump() {
+    const ctx = this.ctx;
+    const now = ctx.currentTime;
+    if (now - (this.lastBump || -10) < 0.3) return;
+    this.lastBump = now;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(95, now);
+    osc.frequency.exponentialRampToValueAtTime(52, now + 0.12);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.30, now + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+    osc.connect(g);
+    g.connect(this.master);
+    osc.start(now);
+    osc.stop(now + 0.2);
+
+    if (navigator.vibrate) navigator.vibrate(12);
   },
 
   // -- ping ---------------------------------------------------------
@@ -771,6 +972,8 @@ function onUp(e) {
     if (p.zone === 'EAR') {
       Audio2.ping();
       say('Ping');
+    } else if (p.zone === 'HAND') {
+      tryRescue();
     } else if (p.zone === 'MENU') {
       const now = performance.now();
       if (now - input.lastMenu < 400) {
@@ -1034,7 +1237,7 @@ const tutorial = {
       hold: 12,
     },
     {
-      text: 'Two taps in the middle restarts or recalibrates. Hold the middle to hear all this again. Go and find your crew.',
+      text: 'Three crew are out there. Their beacons are pulsing now, faster when you are close. Tap the bottom left when you reach one. Two taps in the middle restarts, a long press repeats all this.',
       hold: 9,
     },
   ],
@@ -1097,6 +1300,60 @@ function tutorialSeen() {
   catch (e) { return false; }
 }
 
+// ---------------------------------------------------------------- rescue
+
+/*
+ * The hand is a tap, not a hold: holding the bottom left is how you go quiet,
+ * and one corner cannot mean two things. Tap to take what is here.
+ */
+
+function tryRescue() {
+  if (crew.done) return;
+
+  const reach = 1.15;
+  const found = (Audio2.crew || []).find(
+    m => !m.rescued && Math.hypot(m.x - player.x, m.z - player.z) < reach
+  );
+
+  if (!found) {
+    say('Nothing here.');
+    return;
+  }
+
+  found.rescued = true;
+  crew.rescued++;
+  Audio2.rescueChime();
+
+  const left = crew.total - crew.rescued;
+
+  if (left === 0) {
+    Audio2.makeExit(1.5 * CFG.cell - halfW, 1.5 * CFG.cell - halfH);
+    say('That is all three. Now get back to where you started.');
+  } else {
+    say(left === 1 ? 'One more out there.' : `${left} more out there.`);
+  }
+}
+
+function checkExit() {
+  if (crew.done || !Audio2.exit || Audio2.exit.reached) return;
+
+  const d = Math.hypot(Audio2.exit.x - player.x, Audio2.exit.z - player.z);
+  if (d > 1.2) return;
+
+  Audio2.exit.reached = true;
+  crew.done = true;
+
+  const secs = Math.round((performance.now() - crew.startedAt) / 1000);
+  const mm = Math.floor(secs / 60);
+  const ss = secs % 60;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+  Audio2.rescueChime();
+  say(mm > 0
+    ? `You are out. All three crew. ${plural(mm, 'minute')} ${plural(ss, 'second')}.`
+    : `You are out. All three crew. ${plural(secs, 'second')}.`);
+}
+
 // ---------------------------------------------------------------- movement
 
 function movePlayer(dt) {
@@ -1145,9 +1402,12 @@ function frame(nowMs) {
 
   Audio2.updateProbes(dt);
   Audio2.updateLandmarks();
+  Audio2.updateCrew(dt);
+  checkExit();
 
   hud.textContent =
-    `x ${player.x.toFixed(1)}  z ${player.z.toFixed(1)}  yaw ${(player.yaw * 180 / Math.PI).toFixed(0)}°` +
+    `crew ${crew.rescued}/${crew.total}` +
+    `  x ${player.x.toFixed(1)}  z ${player.z.toFixed(1)}  yaw ${(player.yaw * 180 / Math.PI).toFixed(0)}°` +
     (player.quiet ? '  [quiet]' : '') +
     (tilt.enabled ? `  tilt Δ${tiltForward().toFixed(0)}° (${tilt.angle}°)` : '');
 
@@ -1180,6 +1440,12 @@ async function start(wantTilt) {
   addEventListener('pointercancel', onUp);
 
   keepAwake(true);
+
+  crew.startedAt = performance.now();
+  crew.rescued = 0;
+  crew.done = false;
+  // The maze decides how many crew actually fit, not the other way round.
+  crew.total = Audio2.crew.length;
 
   if (tiltOk) {
     // Permission can be granted and still deliver nothing - a desktop, a
