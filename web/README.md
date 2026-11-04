@@ -9,6 +9,27 @@ Open `http://<your-computer-ip>:8000/web/index.html`.
 
 ---
 
+## Publishing
+
+    ./tools/publish.sh "what changed"
+
+That is the whole process. It does three things:
+
+1. bumps `CACHE` in `sw.js` (skip it and phones keep the old build),
+2. commits and pushes the source to `main`,
+3. force-pushes the contents of `web/` to the `gh-pages` branch.
+
+GitHub Pages serves the `gh-pages` branch directly — **there is no build step on
+GitHub's side and no Actions workflow**, so publishing cannot get stuck in a
+runner queue.
+
+Live at: https://himanshuxai.github.io/thelastcrew/
+
+After publishing, fully close the app on the phone and reopen it. A PWA does not
+reload itself.
+
+---
+
 ## Installing it on a phone
 
 The game is a Progressive Web App: it can live on the home screen, open

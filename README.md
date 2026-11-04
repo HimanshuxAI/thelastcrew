@@ -84,8 +84,13 @@ front ends to the same game:
 
 **Play it: https://himanshuxai.github.io/thelastcrew/**
 
-Any push to `main` redeploys the web build automatically
-(`.github/workflows/deploy-pages.yml`). Only `web/` is published.
+Publishing a change is one command:
+
+    ./tools/publish.sh "what changed"
+
+It bumps the service worker cache, commits the source, and pushes `web/` to the
+`gh-pages` branch, which is what Pages serves. No GitHub Actions involved — the
+site deploys from your machine in about ten seconds.
 
 The browser build exists because Web Audio has real HRTF spatialisation and
 built-in speech synthesis, both of which Unity needs plugins for. Try it first:
