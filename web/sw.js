@@ -7,7 +7,7 @@
  * Bump CACHE when you change any asset, or old files will stick around.
  */
 
-const CACHE = 'tlc-v3';
+const CACHE = 'tlc-v4';
 
 const ASSETS = [
   './',
