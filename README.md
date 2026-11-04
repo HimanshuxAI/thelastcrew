@@ -82,15 +82,18 @@ front ends to the same game:
 | Unity | `Assets/` | written, waiting on editor install |
 | Browser / PWA | `web/` | **live**, installable, offline-capable |
 
-**Play it: https://himanshuxai.github.io/thelastcrew/**
+**Play it: https://thelastcrew.pages.dev/**
 
 Publishing a change is one command:
 
     ./tools/publish.sh "what changed"
 
-It bumps the service worker cache, commits the source, and pushes `web/` to the
-`gh-pages` branch, which is what Pages serves. No GitHub Actions involved — the
-site deploys from your machine in about ten seconds.
+It bumps the service worker cache, commits and pushes the source, then deploys
+`web/` to Cloudflare Pages. About five seconds, no build queue.
+
+Cloudflare Pages rather than GitHub Pages: it deploys instantly, and it keeps
+working if the repository is ever made private, which GitHub Pages does not on
+a free plan.
 
 The browser build exists because Web Audio has real HRTF spatialisation and
 built-in speech synthesis, both of which Unity needs plugins for. Try it first:

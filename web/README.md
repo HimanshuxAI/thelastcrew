@@ -17,13 +17,18 @@ That is the whole process. It does three things:
 
 1. bumps `CACHE` in `sw.js` (skip it and phones keep the old build),
 2. commits and pushes the source to `main`,
-3. force-pushes the contents of `web/` to the `gh-pages` branch.
+3. deploys `web/` to Cloudflare Pages.
 
-GitHub Pages serves the `gh-pages` branch directly — **there is no build step on
-GitHub's side and no Actions workflow**, so publishing cannot get stuck in a
-runner queue.
+Cloudflare Pages was chosen over GitHub Pages because it deploys in a few
+seconds with no build queue, and because it keeps working when the repository is
+private — GitHub Pages needs a paid plan for that.
 
-Live at: https://himanshuxai.github.io/thelastcrew/
+One-time setup, already done on this machine:
+
+    npx wrangler login
+    npx wrangler pages project create thelastcrew --production-branch main
+
+Live at: https://thelastcrew.pages.dev/
 
 After publishing, fully close the app on the phone and reopen it. A PWA does not
 reload itself.
