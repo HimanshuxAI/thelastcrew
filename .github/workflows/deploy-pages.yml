@@ -11,8 +11,10 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  # Named per branch, and never cancelled mid-deploy: a half-cancelled Pages
+  # deployment can hold the concurrency lock and block every later run.
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   deploy:
